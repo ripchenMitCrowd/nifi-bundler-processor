@@ -14,7 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.example.processors.bundler;
+package org.example.processors.bundler.file;
 
 import org.apache.commons.io.FilenameUtils;
 import org.apache.commons.io.IOUtils;
@@ -112,54 +112,66 @@ public class BundlerProcessor extends AbstractProcessor {
                 session.getProvenanceReporter().route(flowFile, REL_PERMISSION_DENIED);
                 session.transfer(session.penalize(flowFile), REL_PERMISSION_DENIED);
             } else {
-                final String baseName = FilenameUtils.getBaseName(file.getName());
-                final File parentDir = file.getParentFile();
-
-                final File[] bundleFiles = parentDir.listFiles((dir, name) -> name.contains(baseName));
-                if (bundleFiles == null) {
-                    this.getLogger().error("No files found to bundle with baseName {} in {}", baseName, parentDir);
-                    return;
-                }
-                final Path bundledZip = Path.of(parentDir.toURI()).resolve(baseName+".zip");
-
-                try (ZipOutputStream zos = new ZipOutputStream(new BufferedOutputStream(new FileOutputStream(bundledZip.toFile())))) {
-                    for (File part : bundleFiles) {
-                        ZipEntry zipEntry = new ZipEntry(part.getName());
-                        zipEntry.setSize(bundledZip.toFile().length());
-                        zos.putNextEntry(zipEntry);
-                        try (FileInputStream fis = new FileInputStream(part);
-                             InputStream in = new BufferedInputStream(fis)) {
-                            IOUtils.copy(in,zos);
-                        }
-                        zos.closeEntry();
-                    }
-                } catch (IOException e) {
-                    this.getLogger().error("Could not fetch file {} from file system for {} due to {}; routing to failure", file, flowFile, e.toString(), e);
-                }
-
-                try (FileInputStream fis = new FileInputStream(bundledZip.toFile())) {
-                    flowFile = session.importFrom(fis, flowFile);
-                } catch (IOException e) {
-                    this.getLogger().error("Could not fetch file {} from file system for {} due to {}; routing to failure", file, flowFile, e.toString(), e);
-                    session.transfer(session.penalize(flowFile), REL_FAILURE);
-                    return;
-                }
-                FlowFile bundledFlowFile = flowFile;
-                bundledFlowFile = session.putAllAttributes(bundledFlowFile, Map.of(FILENAME.getName(),bundledZip.toString()));
-
-                session.getProvenanceReporter().fetch(flowFile, file.toURI().toString(), "Replaced content of FlowFile with contents of " + file.toURI(), stopWatch.getElapsed(TimeUnit.MILLISECONDS));
-                session.transfer(bundledFlowFile, REL_SUCCESS);
-                session.commitAsync(() -> this.performCompletionAction(bundleFiles));
+                fetchAndBundleFiles(session, file, flowFile, stopWatch);
             }
         }
     }
 
-    private void performCompletionAction(File[] bundleFiles) {
+    private void fetchAndBundleFiles(ProcessSession session, File file, FlowFile flowFile, StopWatch stopWatch) {
+        final String baseName = FilenameUtils.getBaseName(file.getName());
+        final File parentDir = file.getParentFile();
+
+        final File[] bundleFiles = parentDir.listFiles((dir, name) -> name.contains(baseName));
+        if (bundleFiles == null) {
+            this.getLogger().error("No files found to bundle with baseName {} in {}", baseName, parentDir);
+            return;
+        }
+
+        final File bundledZip = Path.of(parentDir.toURI()).resolve(baseName+".zip").toFile();
+        try (FileOutputStream fileOutputStream = new FileOutputStream(bundledZip);
+             BufferedOutputStream bufferedOutputStream = new BufferedOutputStream(fileOutputStream);
+             ZipOutputStream zos = new ZipOutputStream(bufferedOutputStream)
+        ) {
+            for (File part : bundleFiles) {
+                ZipEntry zipEntry = new ZipEntry(part.getName());
+                zipEntry.setSize(bundledZip.length());
+                zos.putNextEntry(zipEntry);
+                try (FileInputStream fis = new FileInputStream(part);
+                     InputStream in = new BufferedInputStream(fis)) {
+                    IOUtils.copy(in,zos);
+                }
+                zos.closeEntry();
+            }
+        } catch (IOException e) {
+            this.getLogger().error("Could not bundle files into zip file {} due to {}; routing to failure", bundledZip.getAbsolutePath(), e.toString(), e);
+        }
+
+        FlowFile bundledFlowFile;
+        try (FileInputStream fis = new FileInputStream(bundledZip)) {
+            bundledFlowFile = session.importFrom(fis, flowFile);
+        } catch (IOException e) {
+            this.getLogger().error("Could not fetch file {} from file system for {} due to {}; routing to failure", file, flowFile, e.toString(), e);
+            session.transfer(session.penalize(flowFile), REL_FAILURE);
+            return;
+        }
+
+        bundledFlowFile = session.putAllAttributes(bundledFlowFile, Map.of(FILENAME.getName(),bundledZip.getAbsolutePath()));
+        session.getProvenanceReporter().fetch(flowFile, bundledZip.toURI().toString(), "Replaced content of FlowFile with contents of " + bundledZip.toURI(), stopWatch.getElapsed(TimeUnit.MILLISECONDS));
+        session.transfer(bundledFlowFile, REL_SUCCESS);
+        session.commitAsync(() -> this.performCompletionAction(bundledZip,bundleFiles));
+    }
+
+    private void performCompletionAction(File bundledZip, File[] bundleFiles) {
+        try {
+            Files.delete(bundledZip.toPath());
+        } catch (IOException e) {
+            this.getLogger().error("Failed to delete processed file {} due to {}; routing to success", bundledZip.getAbsolutePath(), e);
+        }
         for (File part : bundleFiles) {
             try {
                Files.delete(part.toPath());
             } catch (IOException e) {
-                this.getLogger().warn("Failed to delete processed file {} due to {}; routing to success", part.getAbsolutePath(), e);
+                this.getLogger().error("Failed to delete processed file {} due to {}; routing to success", part.getAbsolutePath(), e);
             }
         }
     }

@@ -38,7 +38,12 @@
         </dependency>
         <dependency>
             <groupId>org.apache.nifi</groupId>
-            <artifactId>nifi-file-transfer</artifactId>
+            <artifactId>nifi-standard-processors</artifactId>
+            <version>${nifiVersion}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.nifi</groupId>
+            <artifactId>nifi-proxy-configuration-api</artifactId>
             <version>${nifiVersion}</version>
         </dependency>
         <dependency>
@@ -52,9 +57,16 @@
             <version>${nifiVersion}</version>
         </dependency>
 
+
         <dependency>
             <groupId>org.apache.nifi</groupId>
             <artifactId>nifi-mock</artifactId>
+            <version>${nifiVersion}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.nifi</groupId>
+            <artifactId>nifi-property-utils</artifactId>
             <version>${nifiVersion}</version>
             <scope>test</scope>
         </dependency>

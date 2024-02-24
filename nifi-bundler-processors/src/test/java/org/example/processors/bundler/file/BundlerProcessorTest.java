@@ -14,7 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.example.processors.bundler;
+package org.example.processors.bundler.file;
 
 import org.apache.commons.io.IOUtils;
 import org.apache.nifi.util.TestRunner;
@@ -24,8 +24,8 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.io.ByteArrayInputStream;
 import java.io.File;
-import java.io.FileInputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -36,8 +36,8 @@ import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.example.processors.bundler.BundlerProcessor.FILENAME;
-import static org.example.processors.bundler.BundlerProcessor.REL_SUCCESS;
+import static org.example.processors.bundler.file.BundlerProcessor.FILENAME;
+import static org.example.processors.bundler.file.BundlerProcessor.REL_SUCCESS;
 
 public class BundlerProcessorTest {
 
@@ -90,15 +90,10 @@ public class BundlerProcessorTest {
 
         var results = runner.getFlowFilesForRelationship(REL_SUCCESS);
         assertThat(results).hasSize(2);
-        assertThat(results.get(1).getAttribute(FILENAME.getName())).isEqualTo("C:\\Users\\marti\\Documents\\InteliJProjects\\bundler\\nifi-bundler-processors\\target\\test\\data\\in\\listing2.zip");
-        assertThat(results.get(0).getAttribute(FILENAME.getName())).isEqualTo("C:\\Users\\marti\\Documents\\InteliJProjects\\bundler\\nifi-bundler-processors\\target\\test\\data\\in\\listing1.zip");
+        assertThat(results.get(1).getAttribute(FILENAME.getName())).endsWith("listing2.zip");
+        assertThat(results.get(0).getAttribute(FILENAME.getName())).endsWith("listing1.zip");
 
-        Path bundledFile1 = Path.of(TESTDIR + "/listing1.zip");
-        assertThat(bundledFile1.toFile()).exists();
-        Path bundledFile2 = Path.of(TESTDIR + "/listing2.zip");
-        assertThat(bundledFile2.toFile()).exists();
-
-        try (ZipInputStream zis = new ZipInputStream(new FileInputStream(results.getFirst().getAttribute(FILENAME.getName())))) {
+        try (ZipInputStream zis = new ZipInputStream(new ByteArrayInputStream(results.getFirst().getData()))) {
             ZipEntry entry;
             while((entry = zis.getNextEntry())!=null) {
                 String fileContent = IOUtils.toString(zis, StandardCharsets.UTF_8);
@@ -108,6 +103,10 @@ public class BundlerProcessorTest {
             }
         }
 
+        Path bundledFile1 = Path.of(TESTDIR + "/listing1.zip");
+        assertThat(bundledFile1.toFile()).doesNotExist();
+        Path bundledFile2 = Path.of(TESTDIR + "/listing2.zip");
+        assertThat(bundledFile2.toFile()).doesNotExist();
         assertThat(file1.toFile()).doesNotExist();
         assertThat(file11.toFile()).doesNotExist();
         assertThat(file2.toFile()).doesNotExist();
