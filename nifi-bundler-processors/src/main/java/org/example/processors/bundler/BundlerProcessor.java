@@ -35,7 +35,6 @@ import org.apache.nifi.processor.ProcessSession;
 import org.apache.nifi.processor.Relationship;
 import org.apache.nifi.processor.exception.ProcessException;
 import org.apache.nifi.processor.util.StandardValidators;
-import org.apache.nifi.processors.standard.ListFile;
 import org.apache.nifi.util.StopWatch;
 
 import java.io.*;
@@ -49,7 +48,6 @@ import java.util.zip.ZipOutputStream;
 @InputRequirement(InputRequirement.Requirement.INPUT_REQUIRED)
 @Tags({"local", "files", "filesystem", "ingest", "ingress", "get", "fetch"})
 @CapabilityDescription("Reads the contents of a file from disk and streams it into the contents of an incoming FlowFile. Once this is done, the file is optionally moved elsewhere or deleted to help keep the file system organized.")
-@SeeAlso({ListFile.class})
 @Restricted(
         restrictions = {@Restriction(
                 requiredPermission = RequiredPermission.READ_FILESYSTEM,
@@ -59,17 +57,6 @@ import java.util.zip.ZipOutputStream;
                 explanation = "Provides operator the ability to delete any file that NiFi has access to."
         )}
 )
-@MultiProcessorUseCases({@MultiProcessorUseCase(
-        description = "Ingest specific files from a directory into NiFi, filtering on file extension",
-        keywords = {"local", "files", "filesystem", "ingest", "ingress", "get", "source", "input", "fetch", "filter"},
-        configurations = {@ProcessorConfiguration(
-                processorClass = ListFile.class,
-                configuration = "Configure the \"Input Directory\" property to point to the directory that you want to ingest files from.\nSet the \"Input Directory Location\" property to \"Local\"\nSet the \"File Filter\" property to a Regular Expression that matches the filename (without path) of the files that you want to ingest. For example, to ingest all .jpg files, set the value to `.*\\.jpg`\nOptionally, set \"Minimum File Age\" to a small value such as \"1 min\" to avoid ingesting files that are still being written to.\n\nConnect the 'success' Relationship to the FetchFile processor.\n"
-        ), @ProcessorConfiguration(
-                processorClass = BundlerProcessor.class,
-                configuration = "Set the \"File to Fetch\" property to `${absolute.path}/${filename}`\nSet the \"Completion Strategy\" property to `None`\n"
-        )}
-)})
 public class BundlerProcessor extends AbstractProcessor {
 
     static final PropertyDescriptor FILENAME = (new PropertyDescriptor.Builder()).name("File to Fetch").description("The fully-qualified filename of the file to fetch from the file system").addValidator(StandardValidators.NON_EMPTY_VALIDATOR).expressionLanguageSupported(ExpressionLanguageScope.FLOWFILE_ATTRIBUTES).defaultValue("${absolute.path}/${filename}").required(true).build();

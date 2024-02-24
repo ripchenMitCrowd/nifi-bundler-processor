@@ -24,7 +24,7 @@
 
     <groupId>org.example</groupId>
     <artifactId>bundler</artifactId>
-    <version>1.0</version>
+    <version>2.0.0-M2</version>
     <packaging>pom</packaging>
 
     <properties>
