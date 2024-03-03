@@ -4,7 +4,6 @@ import org.apache.commons.io.IOUtils;
 import org.apache.nifi.flowfile.FlowFile;
 import org.apache.nifi.processor.ProcessContext;
 import org.apache.nifi.processor.util.file.transfer.FileInfo;
-import org.apache.nifi.processor.util.file.transfer.FileTransfer;
 import org.apache.nifi.util.TestRunner;
 import org.apache.nifi.util.TestRunners;
 import org.junit.jupiter.api.BeforeEach;
@@ -29,7 +28,7 @@ class BundlerSFTPProcessorTest {
     void setUp() {
         runner = TestRunners.newTestRunner(new BundlerSFTPProcessor() {
             @Override
-            protected FileTransfer createFileTransfer(ProcessContext context) {
+            protected BundlingSFTPTransfer createFileTransfer(ProcessContext context) {
                 return new BundlingSFTPTransfer(context, getLogger()) {
                     @Override
                     public List<FileInfo> getListing(boolean applyFilters) {

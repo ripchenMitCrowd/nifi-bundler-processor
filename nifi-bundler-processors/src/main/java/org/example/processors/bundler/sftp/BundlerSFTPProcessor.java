@@ -41,6 +41,7 @@ import org.apache.nifi.processors.standard.util.FTPTransfer;
 import org.apache.nifi.processors.standard.util.SFTPTransfer;
 import org.apache.nifi.util.StopWatch;
 import org.apache.nifi.util.Tuple;
+import org.jetbrains.annotations.NotNull;
 
 import java.io.FileNotFoundException;
 import java.io.IOException;
@@ -122,6 +123,7 @@ public class BundlerSFTPProcessor extends AbstractProcessor {
             .required(true)
             .addValidator(StandardValidators.NON_EMPTY_VALIDATOR)
             .expressionLanguageSupported(ExpressionLanguageScope.FLOWFILE_ATTRIBUTES)
+            .defaultValue("${path}/${filename}")
             .build();
 
     public static final PropertyDescriptor REMOTE_PATH = new PropertyDescriptor.Builder()
@@ -256,10 +258,80 @@ public class BundlerSFTPProcessor extends AbstractProcessor {
         }
 
         final StopWatch stopWatch = new StopWatch(true);
+        final String filename = context.getProperty(REMOTE_FILENAME).evaluateAttributeExpressions(flowFile).getValue();
         final String host = context.getProperty(HOSTNAME).evaluateAttributeExpressions(flowFile).getValue();
         final int port = context.getProperty(UNDEFAULTED_PORT).evaluateAttributeExpressions(flowFile).asInteger();
-        final String filename = context.getProperty(REMOTE_FILENAME).evaluateAttributeExpressions(flowFile).getValue();
 
+        BlockingQueue<FileTransferIdleWrapper> transferQueue = getQueue(host, port);
+        BundlingSFTPTransfer transfer = getFileTransfer(context, transferQueue);
+        Relationship failureRelationship = null;
+        // Pull data from remote system.
+        try {
+            flowFile = transfer.getRemoteFile(filename, flowFile, session);
+            if (flowFile.getAttribute("parts") == null) {
+                failureRelationship = REL_COMMS_FAILURE;
+            }
+        } catch (final FileNotFoundException e) {
+            failureRelationship = REL_NOT_FOUND;
+            getLogger().log(LogLevel.ERROR, "Failed to fetch content for {} from filename {} on remote host {} because the file could not be found on the remote system; routing to {}",
+                    flowFile, filename, host, failureRelationship.getName());
+        } catch (final PermissionDeniedException e) {
+            failureRelationship = REL_PERMISSION_DENIED;
+            getLogger().error("Failed to fetch content for {} from filename {} on remote host {} due to insufficient permissions; routing to {}",
+                    flowFile, filename, host, failureRelationship.getName());
+        } catch (final ProcessException | IOException e) {
+            failureRelationship = REL_COMMS_FAILURE;
+            getLogger().error("Failed to fetch content for {} from filename {} on remote host {}:{} due to {}; routing to {}",
+                    flowFile, filename, host, port, e.toString(), failureRelationship.getName(), e);
+        }
+
+        // Add FlowFile attributes
+        final Map<String, String> attributes = new HashMap<>();
+        final String protocolName = transfer.getProtocolName();
+
+        attributes.put(protocolName + ".remote.host", host);
+        attributes.put(protocolName + ".remote.port", String.valueOf(port));
+        attributes.put(protocolName + ".remote.filename", filename);
+        flowFile = session.putAllAttributes(flowFile, attributes);
+
+        if (failureRelationship != null) {
+            attributes.put(FAILURE_REASON_ATTRIBUTE, failureRelationship.getName());
+            flowFile = session.putAllAttributes(flowFile, attributes);
+            session.getProvenanceReporter().route(flowFile, failureRelationship);
+            session.transfer(session.penalize(flowFile), failureRelationship);
+            return;
+        }
+
+        // emit provenance event and transfer FlowFile
+        session.getProvenanceReporter().fetch(flowFile, protocolName + "://" + host + ":" + port + "/" + filename, stopWatch.getElapsed(TimeUnit.MILLISECONDS));
+        session.transfer(flowFile, REL_SUCCESS);
+
+        // it is critical that we commit the session before moving/deleting the remote file. Otherwise, we could have a situation where
+        // we ingest the data, delete/move the remote file, and then NiFi dies/is shut down before the session is committed. This would
+        // result in data loss! If we commit the session first, we are safe.
+        final BlockingQueue<FileTransferIdleWrapper> queue = transferQueue;
+        final Runnable cleanupTask = () -> cleanupTransfer(transfer, queue);
+        final FlowFile flowFileReceived = flowFile;
+        session.commitAsync(() -> {
+            performCompletionStrategy(transfer, flowFileReceived);
+            cleanupTask.run();
+        }, t -> cleanupTask.run());
+    }
+
+    private BundlingSFTPTransfer getFileTransfer(ProcessContext context, BlockingQueue<FileTransferIdleWrapper> transferQueue) {
+        // we have a queue of FileTransfer Objects. Get one from the queue or create a new one.
+        BundlingSFTPTransfer transfer;
+        FileTransferIdleWrapper transferWrapper = transferQueue.poll();
+        if (transferWrapper == null) {
+            transfer = createFileTransfer(context);
+        } else {
+            transfer = transferWrapper.fileTransfer();
+        }
+        return transfer;
+    }
+
+    @NotNull
+    private BlockingQueue<FileTransferIdleWrapper> getQueue(String host, int port) {
         // Try to get a FileTransfer object from our cache.
         BlockingQueue<FileTransferIdleWrapper> transferQueue;
         synchronized (fileTransferMap) {
@@ -277,117 +349,29 @@ public class BundlerSFTPProcessor extends AbstractProcessor {
                 lastClearTime = System.currentTimeMillis();
             }
         }
+        return transferQueue;
+    }
 
-        // we have a queue of FileTransfer Objects. Get one from the queue or create a new one.
-        FileTransfer transfer;
-        FileTransferIdleWrapper transferWrapper = transferQueue.poll();
-        if (transferWrapper == null) {
-            transfer = createFileTransfer(context);
-        } else {
-            transfer = transferWrapper.fileTransfer();
-        }
-
-        Relationship failureRelationship = null;
-        boolean closeConnOnFailure = false;
-
-        try {
-            // Pull data from remote system.
-            try {
-                flowFile = transfer.getRemoteFile(filename, flowFile, session);
-                if (flowFile == null) {
-                    failureRelationship = REL_COMMS_FAILURE;
-                }
-            } catch (final FileNotFoundException e) {
-                failureRelationship = REL_NOT_FOUND;
-                getLogger().log(LogLevel.ERROR, "Failed to fetch content for {} from filename {} on remote host {} because the file could not be found on the remote system; routing to {}",
-                        flowFile, filename, host, failureRelationship.getName());
-            } catch (final PermissionDeniedException e) {
-                failureRelationship = REL_PERMISSION_DENIED;
-                getLogger().error("Failed to fetch content for {} from filename {} on remote host {} due to insufficient permissions; routing to {}",
-                        flowFile, filename, host, failureRelationship.getName());
-            } catch (final ProcessException | IOException e) {
-                failureRelationship = REL_COMMS_FAILURE;
-                getLogger().error("Failed to fetch content for {} from filename {} on remote host {}:{} due to {}; routing to {}",
-                        flowFile, filename, host, port, e.toString(), failureRelationship.getName(), e);
-                closeConnOnFailure = true;
-            }
-
-            // Add FlowFile attributes
-            final Map<String, String> attributes = new HashMap<>();
-            final String protocolName = transfer.getProtocolName();
-
-            attributes.put(protocolName + ".remote.host", host);
-            attributes.put(protocolName + ".remote.port", String.valueOf(port));
-            attributes.put(protocolName + ".remote.filename", filename);
-
-            if (failureRelationship != null) {
-                attributes.put(FAILURE_REASON_ATTRIBUTE, failureRelationship.getName());
-                flowFile = session.putAllAttributes(flowFile, attributes);
-                session.transfer(session.penalize(flowFile), failureRelationship);
-                session.getProvenanceReporter().route(flowFile, failureRelationship);
-                cleanupTransfer(transfer, closeConnOnFailure, transferQueue, host, port);
-                return;
-            }
-
-            flowFile = session.putAllAttributes(flowFile, attributes);
-
-            // emit provenance event and transfer FlowFile
-            session.getProvenanceReporter().fetch(flowFile, protocolName + "://" + host + ":" + port + "/" + filename, stopWatch.getElapsed(TimeUnit.MILLISECONDS));
-            session.transfer(flowFile, REL_SUCCESS);
-
-            // it is critical that we commit the session before moving/deleting the remote file. Otherwise, we could have a situation where
-            // we ingest the data, delete/move the remote file, and then NiFi dies/is shut down before the session is committed. This would
-            // result in data loss! If we commit the session first, we are safe.
-            final BlockingQueue<FileTransferIdleWrapper> queue = transferQueue;
-            final Runnable cleanupTask = () -> cleanupTransfer(transfer, false, queue, host, port);
-
-            final FlowFile flowFileReceived = flowFile;
-            session.commitAsync(() -> {
-                performCompletionStrategy(transfer, flowFileReceived, filename);
-                cleanupTask.run();
-            }, t -> cleanupTask.run());
-        } catch (final Throwable t) {
-            getLogger().error("Failed to fetch file", t);
-            cleanupTransfer(transfer, true, transferQueue, host, port);
+    private void cleanupTransfer(final BundlingSFTPTransfer transfer, final BlockingQueue<FileTransferIdleWrapper> transferQueue) {
+        getLogger().debug("Returning FileTransfer to pool...");
+        if (!transferQueue.offer(new FileTransferIdleWrapper(transfer, System.nanoTime()))) {
+            getLogger().warn("Failed to return FileTransfer to pool");
         }
     }
 
-    private void cleanupTransfer(final FileTransfer transfer, final boolean closeConnection, final BlockingQueue<FileTransferIdleWrapper> transferQueue, final String host, final int port) {
-        if (closeConnection) {
-            getLogger().debug("Closing FileTransfer...");
+    private void performCompletionStrategy(final FileTransfer transfer, final FlowFile flowFile) {
+        var parts = flowFile.getAttribute("parts").split(",");
+        if (parts == null) {
+            getLogger().error("parts attribute is null! Cannot delete fetched files!");
+            return;
+        }
+        for (String partName : parts) {
             try {
-                transfer.close();
-            } catch (final IOException e) {
-                getLogger().warn("Failed to close connection to {}:{} due to {}", host, port, e.getMessage(), e);
-            }
-        } else {
-            getLogger().debug("Returning FileTransfer to pool...");
-            if (!transferQueue.offer(new FileTransferIdleWrapper(transfer, System.nanoTime()))) {
-                getLogger().warn("Failed to return FileTransfer to pool");
-            }
-        }
-    }
-
-    private void performCompletionStrategy(final FileTransfer transfer, final FlowFile flowFile, final String filename) {
-        try {
-            transfer.deleteFile(flowFile, null, filename);
-        } catch (final FileNotFoundException e) {
-            // file doesn't exist -- effectively the same as removing it. Move on.
-        } catch (final IOException ioe) {
-            getLogger().warn("Successfully fetched the content for {} but failed to remove the remote file due to {}", filename, ioe);
-        }
-        try {
-            var parts = flowFile.getAttribute("parts").split(",");
-            if (parts == null) {
-                return;
-            }
-            for (String partName : parts) {
                 transfer.deleteFile(flowFile, null, partName);
+                getLogger().log(LogLevel.DEBUG, "deleted bundle part file: {}", partName);
+            } catch (final IOException ioe) {
+                getLogger().error("Failed to delete fetched bundle part file {}", partName);
             }
-        } catch (final FileNotFoundException e) {
-            // file doesn't exist -- effectively the same as removing it. Move on.
-        } catch (final IOException ioe) {
-            getLogger().warn("Successfully fetched the content for {} but failed to remove the remote file due to {}", filename, ioe);
         }
     }
 
@@ -395,7 +379,8 @@ public class BundlerSFTPProcessor extends AbstractProcessor {
      * Wrapper around a FileTransfer object that is used to know when the FileTransfer was last used, so that
      * we have the ability to close connections that are "idle," or unused for some period of time.
      */
-    private record FileTransferIdleWrapper(FileTransfer fileTransfer, long lastUsed) {}
+    private record FileTransferIdleWrapper(BundlingSFTPTransfer fileTransfer, long lastUsed) {
+    }
 
     /**
      * Creates a new instance of a FileTransfer that can be used to pull files from a remote system.
@@ -403,7 +388,7 @@ public class BundlerSFTPProcessor extends AbstractProcessor {
      * @param context the ProcessContext to use in order to obtain configured properties
      * @return a FileTransfer that can be used to pull files from a remote system
      */
-    protected FileTransfer createFileTransfer(final ProcessContext context) {
+    protected BundlingSFTPTransfer createFileTransfer(final ProcessContext context) {
         return new BundlingSFTPTransfer(context, getLogger());
     }
 

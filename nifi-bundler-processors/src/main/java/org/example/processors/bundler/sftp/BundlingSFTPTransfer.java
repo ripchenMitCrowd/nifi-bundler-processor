@@ -36,30 +36,36 @@ public class BundlingSFTPTransfer extends SFTPTransfer {
         final String baseName = FilenameUtils.getBaseName(remoteFileName);
         final File bundledZip = new File(baseName+".zip");
 
-        var currentRemoteFilesList = this.getListing(true);
+        var currentRemoteFilesList = this.getListing(false);
+
+        logger.log(LogLevel.DEBUG, "Listing for {} yields {} files", remoteFileName, currentRemoteFilesList.size());
+        currentRemoteFilesList.forEach(fileInfo -> logger.log(LogLevel.DEBUG, "filename: {}, path: {}", fileInfo.getFileName(), fileInfo.getFullPathFileName()));
+
         var remoteBundleFilesList = currentRemoteFilesList.stream()
-                .map(FileInfo::getFileName)
-                .filter(fileName -> fileName.startsWith(baseName))
+                .filter(fileInfo -> fileInfo.getFileName().startsWith(baseName))
                 .toList();
         if (remoteBundleFilesList.isEmpty()) {
             logger.log(LogLevel.ERROR, "No additional files could be found on the remote system to bundle with {}", remoteFileName);
-            return null;
+            return origFlowFile;
         }
+
+        logger.log(LogLevel.DEBUG, "Bundling {} files into {}", remoteBundleFilesList.size(), bundledZip);
+        remoteBundleFilesList.forEach(fileInfo -> logger.log(LogLevel.DEBUG, "bundle part: filename: {}, path: {}", fileInfo.getFileName(), fileInfo.getFullPathFileName()));
 
         try (FileOutputStream fileOutputStream = new FileOutputStream(bundledZip);
              BufferedOutputStream bufferedOutputStream = new BufferedOutputStream(fileOutputStream);
              ZipOutputStream zos = new ZipOutputStream(bufferedOutputStream)
         ) {
-            for (String partFileName : remoteBundleFilesList) {
-                ZipEntry zipEntry = new ZipEntry(partFileName);
+            for (FileInfo partFileInfo : remoteBundleFilesList) {
+                ZipEntry zipEntry = new ZipEntry(partFileInfo.getName());
                 zipEntry.setSize(bundledZip.length());
                 zos.putNextEntry(zipEntry);
-                downloadFile(remoteFileName, origFlowFile, partFileName, zos);
+                downloadFile(remoteFileName, origFlowFile, partFileInfo.getFullPathFileName(), zos);
                 zos.closeEntry();
             }
         } catch (IOException e) {
             logger.error("Could not bundle files into zip file {} due to {}; routing to failure", bundledZip.getAbsolutePath(), e.toString(), e);
-            return null;
+            return origFlowFile;
         }
 
         FlowFile bundledFlowFile;
@@ -67,7 +73,7 @@ public class BundlingSFTPTransfer extends SFTPTransfer {
             bundledFlowFile = session.importFrom(fis, origFlowFile);
         } catch (IOException e) {
             logger.error("Could not put flow file {} due to {}; routing to failure", bundledZip.getAbsolutePath(), e.toString(), e);
-            return null;
+            return origFlowFile;
         }
         FileUtils.delete(bundledZip);
 
@@ -77,7 +83,7 @@ public class BundlingSFTPTransfer extends SFTPTransfer {
             attributes.put(CoreAttributes.PATH.key(), parentPath);
         }
         attributes.put(CoreAttributes.FILENAME.key(), bundledZip.getName());
-        attributes.put("parts", remoteBundleFilesList.toString().replaceAll("\\[","").replaceAll("]","").replaceAll(", ",","));
+        attributes.put("parts", remoteBundleFilesList.stream().map(FileInfo::getFullPathFileName).toList().toString().replaceAll("\\[","").replaceAll("]","").replaceAll(", ",","));
         return session.putAllAttributes(bundledFlowFile, attributes);
     }
 
